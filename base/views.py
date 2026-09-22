@@ -853,8 +853,17 @@ def login_user(request):
             next_url += f"?{params}"
         return redirect(next_url)
 
+    from google_workspace_auth.models import GoogleWorkspaceSettings
+
     return render(
-        request, "login.html", {"initialize_database": initialize_database_condition()}
+        request,
+        "login.html",
+        {
+            "initialize_database": initialize_database_condition(),
+            "google_workspace_enabled": GoogleWorkspaceSettings.objects.filter(
+                is_enabled=True
+            ).exists(),
+        },
     )
 
 

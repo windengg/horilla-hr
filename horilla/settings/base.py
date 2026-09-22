@@ -96,6 +96,7 @@ INSTALLED_APPS = [
     "horilla_ldap",
     "horilla_dbtemplate",
     "horilla_tour",
+    "google_workspace_auth",
 ]
 
 # ========================================
