@@ -1,12 +1,14 @@
-# Build and publish the official Horilla HR image to Docker Hub.
+# Build and publish this fork's image to GitHub Container Registry (GHCR),
+# under whichever repo it lives in -- nothing below is hardcoded to an owner
+# or repo name.
 #
 # docker-ci.yml is the PR gate and stays untouched; this is the release path.
 # It smoke-tests the built image before any push, so a broken image cannot be
 # published even if the build itself succeeds.
 #
 # Tag policy is driven entirely by whether the git tag has a pre-release suffix:
-#   2.0.0       -> 2.0.0, 2.0, latest   + mirror to the deprecated horilla/horilla
-#   2.0.0-rc1   -> 2.0.0-rc1 only       (no latest, no minor alias, no mirror)
+#   2.0.0       -> 2.0.0, 2.0, latest
+#   2.0.0-rc1   -> 2.0.0-rc1 only       (no latest, no minor alias)
 # A pre-release must never take `latest` -- that is the one mistake here that
 # would reach users, so it is asserted in the summary and testable via dry_run.
 
@@ -28,9 +30,12 @@ on:
         default: true
 
 env:
-  IMAGE: horilla/horilla-hr
-  LEGACY_IMAGE: horilla/horilla
   PLATFORMS: linux/amd64,linux/arm64
+
+permissions:
+  contents: read
+  # Required to push to GHCR under this repo.
+  packages: write
 
 jobs:
   publish:
@@ -40,6 +45,16 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Resolve image name from repo owner/name
+        id: img
+        run: |
+          set -euo pipefail
+          # ghcr.io requires a lowercase path; github.repository preserves
+          # whatever case the repo was created with.
+          IMAGE="ghcr.io/$(printf '%s' "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')"
+          echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
+          echo "Publishing as $IMAGE"
 
       - name: Resolve version and release channel
         id: v
@@ -217,26 +232,27 @@ jobs:
 
       # ---- Publish. Everything below is skipped on a dry run. ----
 
-      - name: Log in to Docker Hub
+      - name: Log in to GHCR
         if: steps.v.outputs.dry_run != 'true'
         uses: docker/login-action@v3
         with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Compute tags
         id: tags
         run: |
           set -euo pipefail
+          IMAGE="${{ steps.img.outputs.image }}"
           V="${{ steps.v.outputs.version }}"
           if [ "${{ steps.v.outputs.prerelease }}" = "true" ]; then
             # Pre-release: the exact version and nothing else. No latest, no
-            # minor alias, and never the deprecated mirror.
+            # minor alias.
             TAGS="${IMAGE}:${V}"
           else
             MINOR="${V%.*}"
             TAGS="${IMAGE}:${V},${IMAGE}:${MINOR},${IMAGE}:latest"
-            TAGS="${TAGS},${LEGACY_IMAGE}:${V},${LEGACY_IMAGE}:${MINOR},${LEGACY_IMAGE}:latest"
           fi
           echo "tags=$TAGS" >> "$GITHUB_OUTPUT"
           {
@@ -272,6 +288,7 @@ jobs:
         if: steps.v.outputs.dry_run != 'true'
         run: |
           set -euo pipefail
+          IMAGE="${{ steps.img.outputs.image }}"
           V="${{ steps.v.outputs.version }}"
           docker buildx imagetools inspect "${IMAGE}:${V}"
 
@@ -288,63 +305,3 @@ jobs:
             fi
             echo "Confirmed: pre-release did not take :latest"
           fi
-
-      # ---- Docker Hub descriptions. Rendered from docker/dockerhub/ so the
-      # published page is a release artifact rather than a manual edit.
-      #
-      # Nothing synced these before, and the pages had drifted badly:
-      # horilla/horilla still told its readers to run `horilla/horilla:1.4`
-      # with `manage.py runserver` -- a January 2026 image and Django's
-      # development server -- and that page carries ~15k pulls, 38x the
-      # canonical name. This page itself claimed "latest -- Currently 2.0.0"
-      # after 2.1.2 had shipped. ----
-
-      - name: Render Docker Hub descriptions
-        if: steps.v.outputs.dry_run != 'true' && steps.v.outputs.prerelease != 'true'
-        run: |
-          set -euo pipefail
-          chmod +x docker/dockerhub/render.sh
-          docker/dockerhub/render.sh canonical "${{ steps.v.outputs.version }}" \
-            > /tmp/desc-canonical.md
-          docker/dockerhub/render.sh legacy "${{ steps.v.outputs.version }}" \
-            > /tmp/desc-legacy.md
-
-          # An unrendered placeholder would be published verbatim to a page with
-          # five figures of traffic, so fail the step instead.
-          for f in /tmp/desc-canonical.md /tmp/desc-legacy.md; do
-            if grep -q '__NOTICE__\|__VERSION__' "$f"; then
-              echo "::error::Unrendered placeholder left in $f"
-              grep -n '__NOTICE__\|__VERSION__' "$f"
-              exit 1
-            fi
-            size=$(wc -c < "$f")
-            echo "$f: $size chars"
-            # Docker Hub rejects a full description over 25,000 characters.
-            if [ "$size" -gt 25000 ]; then
-              echo "::error::$f exceeds Docker Hub's 25,000-character limit"
-              exit 1
-            fi
-          done
-
-      - name: Update horilla/horilla-hr description
-        if: steps.v.outputs.dry_run != 'true' && steps.v.outputs.prerelease != 'true'
-        uses: peter-evans/dockerhub-description@v5
-        with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_DESCRIPTION_TOKEN }}
-          repository: horilla/horilla-hr
-          short-description: "Free and open source HR software - recruitment, attendance, leave, payroll and performance."
-          readme-filepath: /tmp/desc-canonical.md
-
-      # The deprecated mirror is kept in sync deliberately: it carries ~38x the
-      # pull volume of the canonical name, so it is the page most users read.
-      # Leaving it stale is what produced the 1.4/runserver instructions above.
-      - name: Update horilla/horilla description (deprecated mirror)
-        if: steps.v.outputs.dry_run != 'true' && steps.v.outputs.prerelease != 'true'
-        uses: peter-evans/dockerhub-description@v5
-        with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_DESCRIPTION_TOKEN }}
-          repository: horilla/horilla
-          short-description: "[Moved to horilla/horilla-hr] Free and open source HR software."
-          readme-filepath: /tmp/desc-legacy.md
